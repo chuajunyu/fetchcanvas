@@ -1,5 +1,6 @@
 import requests
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -99,10 +100,30 @@ def download_all_files(course_id, folder_id_name_map):
         folder_path = resolve_path_for_file(file['folder_id'], folder_id_name_map)
         filename = os.path.join(OUTPUT_PATH, folder_path, file['filename'])
 
-        download_file(file['url'], filename)
+        if not os.path.exists(filename):
+            download_file(file['url'], filename)
+            continue
+
+        try:
+            canvas_updated = datetime.fromisoformat(
+                file['updated_at'].replace('Z', '+00:00')
+            ).timestamp()
+        except (KeyError, ValueError):
+            print(f"Error parsing updated_at: {file['updated_at']}")
+            canvas_updated = float('inf')
+
+        local_mtime = os.path.getmtime(filename)
+        if canvas_updated > local_mtime:
+            download_file(file['url'], filename)
+        else:
+            print(f"Skipping (up to date): {filename}")
 
 
 if __name__ == "__main__":
     for course_id, course_code in get_all_courses():
-        folder_id_name_map = get_all_folders(course_id, course_code)
-        download_all_files(course_id, folder_id_name_map)
+        if course_code in ["CS3223"]:
+            
+            folder_id_name_map = get_all_folders(course_id, course_code)
+            download_all_files(course_id, folder_id_name_map)
+        else:
+            continue
