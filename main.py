@@ -17,16 +17,12 @@ headers = {
 def get_all_courses():
     url = f"{CANVAS_BASE_URL}/api/v1/courses?enrollment_state=active&per_page=100"
     course_list = requests.get(url, headers=headers).json()
-    print(f"{len(course_list)} courses found")
     courses = []
     for course in course_list:
-        print((course['id'], course["course_code"]))
         if "course_code" in course:
-            print("here")
             courses.append((course['id'], course["course_code"]))
         else:
             print("Course with no Course code found")
-    print(courses)
     return courses
 
 
@@ -54,21 +50,15 @@ def get_all_folders(course_id, course_name):
 
 def download_file(url, save_path):
     try:
-        # Create the directory if it doesn't exist
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        
-        # Send a GET request to the URL
         response = requests.get(url, stream=True)
-        response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
-
-        # Open the file in binary write mode and write the content in chunks
+        response.raise_for_status()
         with open(save_path, 'wb') as file:
             for chunk in response.iter_content(chunk_size=8192):
                 file.write(chunk)
-        print(f"File successfully downloaded and saved to {save_path}")
-
+        return True, None
     except requests.exceptions.RequestException as e:
-        print(f"An error occurred: {e}")
+        return False, str(e)
 
 
 def resolve_path_for_file(folder_id, folder_id_name_map):
@@ -86,22 +76,26 @@ def resolve_path_for_file(folder_id, folder_id_name_map):
     return path
 
 
-def download_all_files(course_id, folder_id_name_map):
+def download_all_files(course_id, folder_id_name_map, course_code):
     url = f"{CANVAS_BASE_URL}/api/v1/courses/{course_id}/files?per_page=100"
     file_list = requests.get(url, headers=headers).json()
 
-    print(f"{len(file_list)} files found")
-    print(file_list)
+    downloaded = []
+    updated = []
+    skipped = []
+    failed = []
 
     for file in file_list:
-        print(file)
-        print(file['folder_id'], file['filename'], file['url'], file['folder_id'])
-        
+        display_name = file['filename']
         folder_path = resolve_path_for_file(file['folder_id'], folder_id_name_map)
-        filename = os.path.join(OUTPUT_PATH, folder_path, file['filename'])
+        save_path = os.path.join(OUTPUT_PATH, folder_path, display_name)
 
-        if not os.path.exists(filename):
-            download_file(file['url'], filename)
+        if not os.path.exists(save_path):
+            ok, err = download_file(file['url'], save_path)
+            if ok:
+                downloaded.append(display_name)
+            else:
+                failed.append((display_name, err or "Unknown error"))
             continue
 
         try:
@@ -109,21 +103,38 @@ def download_all_files(course_id, folder_id_name_map):
                 file['updated_at'].replace('Z', '+00:00')
             ).timestamp()
         except (KeyError, ValueError):
-            print(f"Error parsing updated_at: {file['updated_at']}")
             canvas_updated = float('inf')
 
-        local_mtime = os.path.getmtime(filename)
+        local_mtime = os.path.getmtime(save_path)
         if canvas_updated > local_mtime:
-            download_file(file['url'], filename)
+            ok, err = download_file(file['url'], save_path)
+            if ok:
+                updated.append(display_name)
+            else:
+                failed.append((display_name, err or "Unknown error"))
         else:
-            print(f"Skipping (up to date): {filename}")
+            skipped.append(display_name)
+
+    print(f"\n--- {course_code} ---")
+    print(f"Downloaded (new):    {len(downloaded)}")
+    for name in downloaded:
+        print(f"  - {name}")
+    print(f"Updated (replaced):  {len(updated)}")
+    for name in updated:
+        print(f"  - {name}")
+    print(f"Skipped (up to date): {len(skipped)}")
+    if failed:
+        print(f"Failed:             {len(failed)}")
+        for name, err in failed:
+            print(f"  - {name}: {err}")
 
 
 if __name__ == "__main__":
-    for course_id, course_code in get_all_courses():
-        if course_code in ["CS3223"]:
-            
+    courses = get_all_courses()
+    for course_id, course_code in courses:
+        if course_code in ["CS3234", "CS3223", "CS3211", "NST2007", "NST2036"]:
+            print(f"\nCourse: {course_code}")
             folder_id_name_map = get_all_folders(course_id, course_code)
-            download_all_files(course_id, folder_id_name_map)
+            download_all_files(course_id, folder_id_name_map, course_code)
         else:
             continue
