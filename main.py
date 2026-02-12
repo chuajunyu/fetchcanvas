@@ -9,6 +9,14 @@ API_TOKEN = os.getenv('API_TOKEN')
 CANVAS_BASE_URL = os.getenv('CANVAS_BASE_URL')
 OUTPUT_PATH = os.getenv('OUTPUT_PATH')
 
+_raw_courses = (os.getenv('COURSES') or '').strip()
+if not _raw_courses or _raw_courses.lower() == 'all':
+    SYNC_ALL_COURSES = True
+    COURSE_CODES = None
+else:
+    SYNC_ALL_COURSES = False
+    COURSE_CODES = {c.strip() for c in _raw_courses.split(',') if c.strip()}
+
 headers = {
     "Authorization": f"Bearer {API_TOKEN}"
 }
@@ -131,8 +139,11 @@ def download_all_files(course_id, folder_id_name_map, course_code):
 
 if __name__ == "__main__":
     courses = get_all_courses()
+
+    print(f"Syncing courses: {COURSE_CODES if not SYNC_ALL_COURSES else 'all'}")
+    
     for course_id, course_code in courses:
-        if course_code in ["CS3234", "CS3223", "CS3211", "NST2007", "NST2036"]:
+        if SYNC_ALL_COURSES or course_code in COURSE_CODES:
             print(f"\nCourse: {course_code}")
             folder_id_name_map = get_all_folders(course_id, course_code)
             download_all_files(course_id, folder_id_name_map, course_code)
