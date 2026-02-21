@@ -4,12 +4,17 @@ import os
 import shutil
 from datetime import datetime
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 
 API_TOKEN = os.getenv('API_TOKEN')
 CANVAS_BASE_URL = os.getenv('CANVAS_BASE_URL')
 OUTPUT_PATH = os.getenv('OUTPUT_PATH')
+
+CHANGELOG_NAME = "CHANGELOG.md"
+TIMEZONE = ZoneInfo("Asia/Singapore")
+LAST_SYNC_PREFIX = "# Last Sync: "
 
 _raw_courses = (os.getenv('COURSES') or '').strip()
 if not _raw_courses or _raw_courses.lower() == 'all':
@@ -119,6 +124,58 @@ def download_file(url, save_path):
     except requests.exceptions.RequestException as e:
         return False, str(e)
 
+def build_run_entry(run_started_at, courses_log):
+    run_time = run_started_at.astimezone(TIMEZONE)
+    ts_str = run_time.strftime("%A %Y-%m-%d %H:%M:%S %Z")
+    lines = []
+    lines.append(f"## Sync run at {ts_str}")
+    lines.append("")
+    for course_code, summary_lines in courses_log:
+        lines.append(f"### Course: {course_code}")
+        lines.extend(summary_lines)
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def update_changelog(output_path, run_started_at, entry_md_or_none):
+    """Update Last Sync header and optionally prepend a new entry."""
+    changelog_path = os.path.join(output_path, CHANGELOG_NAME)
+    os.makedirs(output_path, exist_ok=True)
+
+    # Format Last Sync line 
+    run_time = run_started_at.astimezone(TIMEZONE)
+    last_sync_str = run_time.strftime("%A %Y-%m-%d %H:%M:%S %Z")
+    header_line = f"{LAST_SYNC_PREFIX}{last_sync_str}\n\n"
+
+    old_body = ""
+    if os.path.exists(changelog_path):
+        with open(changelog_path, "r", encoding="utf-8") as f:
+            existing = f.read()
+        # Strip old Last Sync header if present
+        if existing.startswith(LAST_SYNC_PREFIX):
+            # Remove first line and any following blank line(s)
+            lines = existing.splitlines(True)
+            # drop first line
+            lines = lines[1:]
+            # drop leading blank lines
+            while lines and lines[0].strip() == "":
+                lines.pop(0)
+            old_body = "".join(lines)
+        else:
+            old_body = existing
+
+    with open(changelog_path, "w", encoding="utf-8") as f:
+        f.write(header_line)
+        if entry_md_or_none:
+            f.write(entry_md_or_none)
+            if old_body:
+                f.write(old_body)
+        else:
+            # No new entry; just keep existing body as-is
+            if old_body:
+                f.write(old_body)
 
 def migrate_old_structure(course_code):
     """Move pre-existing flat downloads into the files/ subfolder.
@@ -185,9 +242,9 @@ def download_all_files(course_id, folder_id_name_map, course_code):
         if not os.path.exists(save_path):
             ok, err = download_file(file['url'], save_path)
             if ok:
-                downloaded.append((display_name, save_path))
+                downloaded.append((display_name, folder_path))
             else:
-                failed.append((display_name, err or "Unknown error"))
+                failed.append((display_name, folder_path, err or "Unknown error"))
             continue
 
         try:
@@ -201,28 +258,33 @@ def download_all_files(course_id, folder_id_name_map, course_code):
         if canvas_updated > local_mtime:
             ok, err = download_file(file['url'], save_path)
             if ok:
-                updated.append((display_name, save_path))
+                updated.append((display_name, folder_path))
             else:
-                failed.append((display_name, err or "Unknown error"))
+                failed.append((display_name, folder_path, err or "Unknown error"))
         else:
-            skipped.append(display_name)
+            skipped.append((display_name, folder_path))
 
+    # Optional: adjust console printing to show paths too
     print(f"\n--- {course_code} ---")
     print(f"Downloaded (new):    {len(downloaded)}")
-    for name, path in downloaded:
-        print(f"  - {name}")
-        print(f"    -> {path}")
+    for name, folder in downloaded:
+        print(f"  - {os.path.join(folder, name)}")
     print(f"Updated (replaced):  {len(updated)}")
-    for name, path in updated:
-        print(f"  - {name}")
-        print(f"    -> {path}")
+    for name, folder in updated:
+        print(f"  - {os.path.join(folder, name)}")
     print(f"Skipped (up to date): {len(skipped)}")
     if failed:
         print(f"Failed:             {len(failed)}")
-        for name, err in failed:
-            print(f"  - {name}: {err}")
+        for name, folder, err in failed:
+            print(f"  - {os.path.join(folder, name)}: {err}")
 
-    return downloaded, updated, skipped, failed
+    return {
+        "course_code": course_code,
+        "downloaded": downloaded,
+        "updated": updated,
+        "skipped": skipped,
+        "failed": failed,
+    }
 
 
 def get_all_modules(course_id, course_code):
@@ -269,14 +331,14 @@ def get_file_details(file_api_url):
 
 
 def download_files_from_modules(course_id, course_code):
-    """Download File-type items found in course modules."""
+    """Download File-type items found in course modules. Returns result dict or None."""
     modules = get_all_modules(course_id, course_code)
     if modules is None:
         print(f"  Modules area not accessible, skipping modules sync.")
-        return
+        return None
     if not modules:
         print(f"  No modules found for {course_code}.")
-        return
+        return None
 
     downloaded = []
     updated = []
@@ -285,6 +347,7 @@ def download_files_from_modules(course_id, course_code):
 
     for module_id, raw_module_name in modules:
         module_name = sanitize_name(raw_module_name)
+        module_folder = os.path.join("modules", module_name)
         file_items = get_module_file_items(course_id, module_id)
         if not file_items:
             continue
@@ -292,18 +355,18 @@ def download_files_from_modules(course_id, course_code):
         for item in file_items:
             file_api_url = item.get('url')
             if not file_api_url:
-                failed.append((item.get('title', '?'), "No file API url in module item"))
+                failed.append((item.get('title', '?'), module_folder, "No file API url in module item"))
                 continue
 
             file_obj = get_file_details(file_api_url)
             if file_obj is None:
-                failed.append((item.get('title', '?'), "Could not fetch file details"))
+                failed.append((item.get('title', '?'), module_folder, "Could not fetch file details"))
                 continue
 
             filename = sanitize_name(file_obj.get('filename') or file_obj.get('display_name', 'unknown'))
             download_url = file_obj.get('url')
             if not download_url:
-                failed.append((filename, "No download url in file object"))
+                failed.append((filename, module_folder, "No download url in file object"))
                 continue
 
             save_path = os.path.join(OUTPUT_PATH, course_code, "modules", module_name, filename)
@@ -311,9 +374,9 @@ def download_files_from_modules(course_id, course_code):
             if not os.path.exists(save_path):
                 ok, err = download_file(download_url, save_path)
                 if ok:
-                    downloaded.append((filename, save_path))
+                    downloaded.append((filename, module_folder))
                 else:
-                    failed.append((filename, err or "Unknown error"))
+                    failed.append((filename, module_folder, err or "Unknown error"))
                 continue
 
             try:
@@ -327,33 +390,75 @@ def download_files_from_modules(course_id, course_code):
             if canvas_updated > local_mtime:
                 ok, err = download_file(download_url, save_path)
                 if ok:
-                    updated.append((filename, save_path))
+                    updated.append((filename, module_folder))
                 else:
-                    failed.append((filename, err or "Unknown error"))
+                    failed.append((filename, module_folder, err or "Unknown error"))
             else:
-                skipped.append(filename)
+                skipped.append((filename, module_folder))
 
     print(f"\n--- {course_code} (from Modules) ---")
     print(f"Downloaded (new):    {len(downloaded)}")
-    for name, path in downloaded:
-        print(f"  - {name}")
-        print(f"    -> {path}")
+    for name, folder in downloaded:
+        print(f"  - {os.path.join(folder, name)}")
     print(f"Updated (replaced):  {len(updated)}")
-    for name, path in updated:
-        print(f"  - {name}")
-        print(f"    -> {path}")
+    for name, folder in updated:
+        print(f"  - {os.path.join(folder, name)}")
     print(f"Skipped (up to date): {len(skipped)}")
     if failed:
         print(f"Failed:             {len(failed)}")
-        for name, err in failed:
-            print(f"  - {name}: {err}")
+        for name, folder, err in failed:
+            print(f"  - {os.path.join(folder, name)}: {err}")
+
+    return {
+        "course_code": course_code,
+        "downloaded": downloaded,
+        "updated": updated,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+def format_course_summary(course_result):
+    downloaded = course_result["downloaded"]   # list of (name, folder_path)
+    updated = course_result["updated"]         # list of (name, folder_path)
+    skipped = course_result["skipped"]         # list of (name, folder_path)
+    failed = course_result["failed"]           # list of (name, folder_path, err)
+
+    if not downloaded and not updated and not failed:
+        return None
+
+    lines = []
+    lines.append(f"- Downloaded (new): {len(downloaded)}")
+    for name, folder in downloaded:
+        rel = os.path.join(folder, name)
+        lines.append(f"  - `{rel}`")
+
+    lines.append(f"- Updated (replaced): {len(updated)}")
+    for name, folder in updated:
+        rel = os.path.join(folder, name)
+        lines.append(f"  - `{rel}`")
+
+    lines.append(f"- Skipped (up to date): {len(skipped)}")
+
+    if failed:
+        lines.append(f"- Failed: {len(failed)}")
+        for name, folder, err in failed:
+            rel = os.path.join(folder, name)
+            lines.append(f"  - `{rel}` — {err}")
+
+    return lines
+
 
 
 if __name__ == "__main__":
+    run_started_at = datetime.now(TIMEZONE)
     courses = get_all_courses()
 
     print(f"Syncing courses: {COURSE_CODES if not SYNC_ALL_COURSES else 'all'}")
-    
+
+    courses_log = []
+    any_changes_or_errors = False
+
     for course_id, course_code in courses:
         if not (SYNC_ALL_COURSES or course_code in COURSE_CODES):
             continue
@@ -363,8 +468,24 @@ if __name__ == "__main__":
 
         folder_id_name_map = get_all_folders(course_id, course_code)
         if folder_id_name_map:
-            download_all_files(course_id, folder_id_name_map, course_code)
+            files_result = download_all_files(course_id, folder_id_name_map, course_code)
         else:
             print(f"  Files area not accessible, skipping files sync.")
+            files_result = None
 
-        download_files_from_modules(course_id, course_code)
+        modules_result = download_files_from_modules(course_id, course_code)
+
+        for result in (files_result, modules_result):
+            if result is None:
+                continue
+            summary_lines = format_course_summary(result)
+            if summary_lines is not None:
+                any_changes_or_errors = True
+                courses_log.append((course_code, summary_lines))
+
+    if any_changes_or_errors:
+        entry_md = build_run_entry(run_started_at, courses_log)
+    else:
+        entry_md = None
+
+    update_changelog(OUTPUT_PATH, run_started_at, entry_md)
