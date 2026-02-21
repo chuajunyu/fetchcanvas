@@ -1,13 +1,18 @@
 import requests
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 
 API_TOKEN = os.getenv('API_TOKEN')
 CANVAS_BASE_URL = os.getenv('CANVAS_BASE_URL')
 OUTPUT_PATH = os.getenv('OUTPUT_PATH')
+
+CHANGELOG_NAME = "CHANGELOG.md"
+TIMEZONE = ZoneInfo("Asia/Singapore")
+LAST_SYNC_PREFIX = "# Last Sync: "
 
 _raw_courses = (os.getenv('COURSES') or '').strip()
 if not _raw_courses or _raw_courses.lower() == 'all':
@@ -68,6 +73,58 @@ def download_file(url, save_path):
     except requests.exceptions.RequestException as e:
         return False, str(e)
 
+def build_run_entry(run_started_at, courses_log):
+    run_time = run_started_at.astimezone(TIMEZONE)
+    ts_str = run_time.strftime("%A %Y-%m-%d %H:%M:%S %Z")
+    lines = []
+    lines.append(f"## Sync run at {ts_str}")
+    lines.append("")
+    for course_code, summary_lines in courses_log:
+        lines.append(f"### Course: {course_code}")
+        lines.extend(summary_lines)
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def update_changelog(output_path, run_started_at, entry_md_or_none):
+    """Update Last Sync header and optionally prepend a new entry."""
+    changelog_path = os.path.join(output_path, CHANGELOG_NAME)
+    os.makedirs(output_path, exist_ok=True)
+
+    # Format Last Sync line 
+    run_time = run_started_at.astimezone(TIMEZONE)
+    last_sync_str = run_time.strftime("%A %Y-%m-%d %H:%M:%S %Z")
+    header_line = f"{LAST_SYNC_PREFIX}{last_sync_str}\n\n"
+
+    old_body = ""
+    if os.path.exists(changelog_path):
+        with open(changelog_path, "r", encoding="utf-8") as f:
+            existing = f.read()
+        # Strip old Last Sync header if present
+        if existing.startswith(LAST_SYNC_PREFIX):
+            # Remove first line and any following blank line(s)
+            lines = existing.splitlines(True)
+            # drop first line
+            lines = lines[1:]
+            # drop leading blank lines
+            while lines and lines[0].strip() == "":
+                lines.pop(0)
+            old_body = "".join(lines)
+        else:
+            old_body = existing
+
+    with open(changelog_path, "w", encoding="utf-8") as f:
+        f.write(header_line)
+        if entry_md_or_none:
+            f.write(entry_md_or_none)
+            if old_body:
+                f.write(old_body)
+        else:
+            # No new entry; just keep existing body as-is
+            if old_body:
+                f.write(old_body)
 
 def resolve_path_for_file(folder_id, folder_id_name_map):
     """
@@ -101,9 +158,9 @@ def download_all_files(course_id, folder_id_name_map, course_code):
         if not os.path.exists(save_path):
             ok, err = download_file(file['url'], save_path)
             if ok:
-                downloaded.append(display_name)
+                downloaded.append((display_name, folder_path))
             else:
-                failed.append((display_name, err or "Unknown error"))
+                failed.append((display_name, folder_path, err or "Unknown error"))
             continue
 
         try:
@@ -117,35 +174,97 @@ def download_all_files(course_id, folder_id_name_map, course_code):
         if canvas_updated > local_mtime:
             ok, err = download_file(file['url'], save_path)
             if ok:
-                updated.append(display_name)
+                updated.append((display_name, folder_path))
             else:
-                failed.append((display_name, err or "Unknown error"))
+                failed.append((display_name, folder_path, err or "Unknown error"))
         else:
-            skipped.append(display_name)
+            skipped.append((display_name, folder_path))
 
+    # Optional: adjust console printing to show paths too
     print(f"\n--- {course_code} ---")
     print(f"Downloaded (new):    {len(downloaded)}")
-    for name in downloaded:
-        print(f"  - {name}")
+    for name, folder in downloaded:
+        print(f"  - {os.path.join(folder, name)}")
     print(f"Updated (replaced):  {len(updated)}")
-    for name in updated:
-        print(f"  - {name}")
+    for name, folder in updated:
+        print(f"  - {os.path.join(folder, name)}")
     print(f"Skipped (up to date): {len(skipped)}")
     if failed:
         print(f"Failed:             {len(failed)}")
-        for name, err in failed:
-            print(f"  - {name}: {err}")
+        for name, folder, err in failed:
+            print(f"  - {os.path.join(folder, name)}: {err}")
+
+    return {
+        "course_code": course_code,
+        "downloaded": downloaded,
+        "updated": updated,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+def format_course_summary(course_result):
+    downloaded = course_result["downloaded"]   # list of (name, folder_path)
+    updated = course_result["updated"]         # list of (name, folder_path)
+    skipped = course_result["skipped"]         # list of (name, folder_path)
+    failed = course_result["failed"]           # list of (name, folder_path, err)
+
+    if not downloaded and not updated and not failed:
+        return None
+
+    lines = []
+    lines.append(f"- Downloaded (new): {len(downloaded)}")
+    for name, folder in downloaded:
+        rel = os.path.join(folder, name)
+        lines.append(f"  - `{rel}`")
+
+    lines.append(f"- Updated (replaced): {len(updated)}")
+    for name, folder in updated:
+        rel = os.path.join(folder, name)
+        lines.append(f"  - `{rel}`")
+
+    lines.append(f"- Skipped (up to date): {len(skipped)}")
+
+    if failed:
+        lines.append(f"- Failed: {len(failed)}")
+        for name, folder, err in failed:
+            rel = os.path.join(folder, name)
+            lines.append(f"  - `{rel}` — {err}")
+
+    return lines
+
 
 
 if __name__ == "__main__":
+    run_started_at = datetime.now(TIMEZONE)
     courses = get_all_courses()
 
     print(f"Syncing courses: {COURSE_CODES if not SYNC_ALL_COURSES else 'all'}")
-    
+
+    courses_log = []
+    any_changes_or_errors = False
+
     for course_id, course_code in courses:
-        if SYNC_ALL_COURSES or course_code in COURSE_CODES:
-            print(f"\nCourse: {course_code}")
-            folder_id_name_map = get_all_folders(course_id, course_code)
-            download_all_files(course_id, folder_id_name_map, course_code)
-        else:
+        if not (SYNC_ALL_COURSES or course_code in COURSE_CODES):
             continue
+
+        print(f"\nCourse: {course_code}")
+        folder_id_name_map = get_all_folders(course_id, course_code)
+        result = download_all_files(course_id, folder_id_name_map, course_code)
+        summary_lines = format_course_summary(result)
+
+        if summary_lines is None:
+            print("  No changes (all files up to date).")
+        else:
+            any_changes_or_errors = True
+            for line in summary_lines:
+                print(line)
+            courses_log.append((course_code, summary_lines))
+
+    # Decide whether to add a per-run entry
+    if any_changes_or_errors:
+        entry_md = build_run_entry(run_started_at, courses_log)
+    else:
+        entry_md = None  # no new log entry
+
+    update_changelog(OUTPUT_PATH, run_started_at, entry_md)
