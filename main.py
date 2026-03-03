@@ -22,9 +22,42 @@ headers = {
 }
 
 
+def canvas_get(endpoint, description, *, on_forbidden_note=None):
+    """
+    Helper for GET requests to Canvas that:
+    - builds the URL from CANVAS_BASE_URL
+    - checks HTTP status
+    - logs helpful error messages (including for hidden/disabled Files areas)
+    - parses and returns JSON, or None on error.
+    """
+    url = f"{CANVAS_BASE_URL}{endpoint}"
+    response = requests.get(url, headers=headers)
+
+    if not response.ok:
+        print(f"Error fetching {description}: {response.status_code} {response.reason}")
+        if on_forbidden_note and response.status_code in (401, 403, 404):
+            print(on_forbidden_note)
+        try:
+            print(response.text)
+        except Exception:
+            pass
+        return None
+
+    try:
+        return response.json()
+    except ValueError:
+        print(f"Failed to parse {description} response as JSON.")
+        print(response.text)
+        return None
+
+
 def get_all_courses():
-    url = f"{CANVAS_BASE_URL}/api/v1/courses?enrollment_state=active&per_page=100"
-    course_list = requests.get(url, headers=headers).json()
+    course_list = canvas_get(
+        "/api/v1/courses?enrollment_state=active&per_page=100",
+        "courses",
+    )
+    if course_list is None:
+        return []
     courses = []
     for course in course_list:
         if "course_code" in course:
@@ -38,9 +71,17 @@ def get_all_folders(course_id, course_name):
     """
     Returns a mapping of id to the folder name
     """
-    url = f"{CANVAS_BASE_URL}/api/v1/courses/{course_id}/folders?per_page=100"
-
-    folder_list = requests.get(url, headers=headers).json()
+    folder_list = canvas_get(
+        f"/api/v1/courses/{course_id}/folders?per_page=100",
+        f"folders for {course_name} ({course_id})",
+        on_forbidden_note=(
+            "Folders endpoint is not accessible. This often happens when the course 'Files' area "
+            "is hidden/disabled or content is only exposed via Modules. "
+            "Downloading from Modules is not supported yet, so this course will be skipped."
+        ),
+    )
+    if folder_list is None:
+        return {}
 
     folder_id_name_map = {}
     for folder in folder_list:
@@ -85,8 +126,17 @@ def resolve_path_for_file(folder_id, folder_id_name_map):
 
 
 def download_all_files(course_id, folder_id_name_map, course_code):
-    url = f"{CANVAS_BASE_URL}/api/v1/courses/{course_id}/files?per_page=100"
-    file_list = requests.get(url, headers=headers).json()
+    file_list = canvas_get(
+        f"/api/v1/courses/{course_id}/files?per_page=100",
+        f"files for {course_code} ({course_id})",
+        on_forbidden_note=(
+            "Files endpoint is not accessible. This usually means the course 'Files' tab is "
+            "hidden/disabled or content is only exposed via Modules. "
+            "Downloading from Modules is not supported yet, so this course will be skipped."
+        ),
+    )
+    if file_list is None:
+        return
 
     downloaded = []
     updated = []
