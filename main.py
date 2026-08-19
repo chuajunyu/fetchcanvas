@@ -123,6 +123,8 @@ def download_file(url, save_path):
         return True, None
     except requests.exceptions.RequestException as e:
         return False, str(e)
+    except OSError as e:
+        return False, str(e)
 
 def build_run_entry(run_started_at, courses_log):
     run_time = run_started_at.astimezone(TIMEZONE)
