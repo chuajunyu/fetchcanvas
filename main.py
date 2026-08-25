@@ -1,7 +1,6 @@
 import re
 import requests
 import os
-import shutil
 from datetime import datetime
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
@@ -178,29 +177,6 @@ def update_changelog(output_path, run_started_at, entry_md_or_none):
             # No new entry; just keep existing body as-is
             if old_body:
                 f.write(old_body)
-
-def migrate_old_structure(course_code):
-    """Move pre-existing flat downloads into the files/ subfolder.
-
-    Idempotent: only moves entries that aren't already the new
-    'files' / 'modules' directories, so partial runs or re-runs are safe.
-    """
-    course_dir = os.path.join(OUTPUT_PATH, course_code)
-    if not os.path.isdir(course_dir):
-        return
-
-    to_move = [e for e in os.listdir(course_dir) if e not in ("files", "modules")]
-    if not to_move:
-        return
-
-    files_dir = os.path.join(course_dir, "files")
-    os.makedirs(files_dir, exist_ok=True)
-    for entry in to_move:
-        src = os.path.join(course_dir, entry)
-        dst = os.path.join(files_dir, entry)
-        shutil.move(src, dst)
-    print(f"  Migrated {course_code} to new folder structure (old files moved to files/)")
-
 
 def resolve_path_for_file(folder_id, folder_id_name_map):
     """
@@ -466,7 +442,6 @@ if __name__ == "__main__":
             continue
 
         print(f"\nCourse: {course_code}")
-        migrate_old_structure(course_code)
 
         folder_id_name_map = get_all_folders(course_id, course_code)
         if folder_id_name_map:
